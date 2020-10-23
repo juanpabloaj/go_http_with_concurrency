@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/google/gops/agent"
 	"github.com/gorilla/mux"
 )
 
@@ -98,6 +99,9 @@ func newHTTPClient() *http.Client {
 }
 
 func main() {
+	if err := agent.Listen(agent.Options{}); err != nil {
+		log.Fatal(err)
+	}
 
 	clientA = newHTTPClient()
 	clientB = newHTTPClient()
