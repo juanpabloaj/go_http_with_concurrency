@@ -10,9 +10,11 @@ import (
 	"strconv"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/google/gops/agent"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sirupsen/logrus"
 )
 
 var jsonContent = ``
@@ -22,6 +24,7 @@ var jsonLil = `{"key1":"val"}`
 
 var clientA *http.Client
 var clientB *http.Client
+var mqttClient mqtt.Client
 var udpClient net.Conn
 var metricChan chan []byte
 
@@ -90,19 +93,6 @@ func withSleepyGoroutine(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-func withSleepyGoroutine(w http.ResponseWriter, r *http.Request) {
-
-	httpGetA()
-
-	_, err := w.Write([]byte(``))
-	if err != nil {
-		log.Printf("%v", err)
-	}
-
-	go func() {
-		time.Sleep(1 * time.Millisecond)
-	}()
-}
 func withTelegrafGoroutine(w http.ResponseWriter, r *http.Request) {
 
 	httpGetA()
@@ -144,8 +134,33 @@ func withMultiTelegrafToChannel(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("%v", err)
 	}
+
 	metricsNumber := 1
-	if val := os.Getenv("METRICS_NUMBER"); val != "" {
+	if val := mux.Vars(r)["metrics_number"]; val != "" {
+		n, _ := strconv.Atoi(val)
+		if n > 0 {
+			metricsNumber = n
+		}
+	}
+
+	for i := 0; i < metricsNumber; i++ {
+		metricChan <- []byte(jsonLil)
+		time.Sleep(200 * time.Microsecond)
+	}
+
+}
+
+func withMqttChannel(w http.ResponseWriter, r *http.Request) {
+
+	httpGetA()
+
+	_, err := w.Write([]byte(``))
+	if err != nil {
+		log.Printf("%v", err)
+	}
+
+	metricsNumber := 1
+	if val := mux.Vars(r)["metrics_number"]; val != "" {
 		n, _ := strconv.Atoi(val)
 		if n > 0 {
 			metricsNumber = n
@@ -181,7 +196,8 @@ func withMultiTelegrafJSON(w http.ResponseWriter, r *http.Request) {
 	}
 
 }
-func metricWorker(mChan chan []byte, udpClient net.Conn) {
+
+func metricWorker(ID int, mChan chan []byte, udpClient net.Conn) {
 
 	for {
 		//log.Printf("Waiting message from chan")
@@ -192,6 +208,18 @@ func metricWorker(mChan chan []byte, udpClient net.Conn) {
 
 	}
 
+}
+
+func mqttWorker(ID int, mChan chan []byte, client mqtt.Client) {
+	log.Printf("starting mqtt worker %s", ID)
+	topic := "sce/metrics"
+
+	for {
+		payload := <-mChan
+		if token := client.Publish(topic, 0, false, string(payload)); token.Wait() && token.Error() != nil {
+			log.Printf("error publishing [%v]", token.Error())
+		}
+	}
 }
 
 func newHTTPClient() *http.Client {
@@ -214,6 +242,23 @@ func newHTTPClient() *http.Client {
 
 }
 
+func newMqttClient() mqtt.Client {
+
+	opts := mqtt.NewClientOptions().AddBroker("tcp://0.0.0.0:1883")
+
+	client := mqtt.NewClient(opts)
+
+RECONNECT:
+	if token := client.Connect(); token.Wait() && token.Error() != nil {
+		log.Printf("error connection to broker [%v]", token.Error())
+		time.Sleep(1 * time.Second)
+		logrus.Errorf("Reconnecting ....")
+		goto RECONNECT
+	}
+
+	return client
+}
+
 func main() {
 	if err := agent.Listen(agent.Options{}); err != nil {
 		log.Fatal(err)
@@ -222,24 +267,18 @@ func main() {
 	clientA = newHTTPClient()
 	clientB = newHTTPClient()
 
-	metricChan = make(chan []byte, 4)
-	udpClient, _ = net.Dial("udp", "0.0.0.0:5140")
+	mqttClient = newMqttClient()
 
-	go metricWorker(metricChan, udpClient)
-	udpClient, _ = net.Dial("udp", "0.0.0.0:5140")
-	go metricWorker(metricChan, udpClient)
-	udpClient, _ = net.Dial("udp", "0.0.0.0:5140")
-	go metricWorker(metricChan, udpClient)
-	udpClient, _ = net.Dial("udp", "0.0.0.0:5140")
-	go metricWorker(metricChan, udpClient)
-	//udpClient, _ = net.Dial("udp", "0.0.0.0:8094")
-	//go metricWorker(metricChan, udpClient)
-	//udpClient, _ = net.Dial("udp", "0.0.0.0:8094")
-	//go metricWorker(metricChan, udpClient)
-	//udpClient, _ = net.Dial("udp", "0.0.0.0:8094")
-	//go metricWorker(metricChan, udpClient)
-	//udpClient, _ = net.Dial("udp", "0.0.0.0:8094")
-	//go metricWorker(metricChan, udpClient)
+	workers := 4
+
+	metricChan = make(chan []byte, 4)
+
+	for i := 0; i < workers; i++ {
+		udpClient, _ = net.Dial("udp", "0.0.0.0:5140")
+		go metricWorker(i, metricChan, udpClient)
+
+		go mqttWorker(i, metricChan, mqttClient)
+	}
 
 	port := "8080"
 	if envPort := os.Getenv("PORT"); envPort != "" {
@@ -255,6 +294,7 @@ func main() {
 	router.HandleFunc("/withtelegrafchan", withTelegrafToChannel)
 	router.HandleFunc("/withmultitelegrafchan", withMultiTelegrafToChannel)
 	router.HandleFunc("/withmultitelegrafjson", withMultiTelegrafJSON)
+	router.HandleFunc("/withmqttchannel", withMqttChannel)
 	router.Handle("/metrics", promhttp.Handler())
 
 	listenAddress := fmt.Sprintf(":%s", port)
