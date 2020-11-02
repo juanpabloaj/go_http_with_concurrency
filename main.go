@@ -21,12 +21,14 @@ var jsonContent = ``
 
 //var jsonLil = `{"key1":"val", "key2":{"deep":"blue"}}`
 var jsonLil = `{"key1":"val"}`
+var jsonLil2 = `{"key2":"val"}`
 
 var clientA *http.Client
 var clientB *http.Client
 var mqttClient mqtt.Client
 var udpClient net.Conn
 var metricChan chan []byte
+var mqttChan chan []byte
 
 func httpGet(ctx context.Context, client *http.Client, requestString string) {
 	request, err := http.NewRequestWithContext(ctx, "GET", requestString, nil)
@@ -136,7 +138,7 @@ func withMultiTelegrafToChannel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	metricsNumber := 1
-	if val := mux.Vars(r)["metrics_number"]; val != "" {
+	if val := r.URL.Query().Get("metrics_number"); val != "" {
 		n, _ := strconv.Atoi(val)
 		if n > 0 {
 			metricsNumber = n
@@ -160,7 +162,7 @@ func withMqttChannel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	metricsNumber := 1
-	if val := mux.Vars(r)["metrics_number"]; val != "" {
+	if val := r.URL.Query().Get("metrics_number"); val != "" {
 		n, _ := strconv.Atoi(val)
 		if n > 0 {
 			metricsNumber = n
@@ -168,7 +170,7 @@ func withMqttChannel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for i := 0; i < metricsNumber; i++ {
-		metricChan <- []byte(jsonLil)
+		mqttChan <- []byte(jsonLil2)
 		time.Sleep(200 * time.Microsecond)
 	}
 
@@ -272,12 +274,13 @@ func main() {
 	workers := 4
 
 	metricChan = make(chan []byte, 4)
+	mqttChan = make(chan []byte, 4)
 
 	for i := 0; i < workers; i++ {
 		udpClient, _ = net.Dial("udp", "0.0.0.0:5140")
 		go metricWorker(i, metricChan, udpClient)
 
-		go mqttWorker(i, metricChan, mqttClient)
+		go mqttWorker(i, mqttChan, mqttClient)
 	}
 
 	port := "8080"
@@ -292,7 +295,7 @@ func main() {
 	router.HandleFunc("/withsleepygoroutine", withSleepyGoroutine)
 	router.HandleFunc("/withtelegraf", withTelegrafGoroutine)
 	router.HandleFunc("/withtelegrafchan", withTelegrafToChannel)
-	router.HandleFunc("/withmultitelegrafchan", withMultiTelegrafToChannel)
+	router.HandleFunc("/withudpchannel", withMultiTelegrafToChannel)
 	router.HandleFunc("/withmultitelegrafjson", withMultiTelegrafJSON)
 	router.HandleFunc("/withmqttchannel", withMqttChannel)
 	router.Handle("/metrics", promhttp.Handler())
