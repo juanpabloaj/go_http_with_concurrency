@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -27,8 +29,10 @@ var clientA *http.Client
 var clientB *http.Client
 var mqttClient mqtt.Client
 var udpClient net.Conn
+var tcpClient net.Conn
 var metricChan chan []byte
 var mqttChan chan []byte
+var tcpChan chan []byte
 
 func httpGet(ctx context.Context, client *http.Client, requestString string) {
 	request, err := http.NewRequestWithContext(ctx, "GET", requestString, nil)
@@ -169,13 +173,60 @@ func withMqttChannel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	payloadSize := 1
+	if val := r.URL.Query().Get("size"); val != "" {
+		n, _ := strconv.Atoi(val)
+		if n > 0 {
+			payloadSize = n
+		}
+	}
+	payloadStruct := map[string]string{
+		"key": strings.Repeat("n", payloadSize),
+	}
+
+	payload, _ := json.Marshal(payloadStruct)
 	for i := 0; i < metricsNumber; i++ {
-		mqttChan <- []byte(jsonLil2)
+		mqttChan <- payload
 		time.Sleep(200 * time.Microsecond)
 	}
 
 }
 
+func withTCP(w http.ResponseWriter, r *http.Request) {
+
+	httpGetA()
+
+	_, err := w.Write([]byte(``))
+	if err != nil {
+		log.Printf("%v", err)
+	}
+
+	metricsNumber := 1
+	if val := r.URL.Query().Get("metrics_number"); val != "" {
+		n, _ := strconv.Atoi(val)
+		if n > 0 {
+			metricsNumber = n
+		}
+	}
+
+	payloadSize := 1
+	if val := r.URL.Query().Get("size"); val != "" {
+		n, _ := strconv.Atoi(val)
+		if n > 0 {
+			payloadSize = n
+		}
+	}
+	payloadStruct := map[string]string{
+		"key": strings.Repeat("n", payloadSize),
+	}
+
+	payload, _ := json.Marshal(payloadStruct)
+	for i := 0; i < metricsNumber; i++ {
+		tcpChan <- payload
+		time.Sleep(200 * time.Microsecond)
+	}
+
+}
 func withMultiTelegrafJSON(w http.ResponseWriter, r *http.Request) {
 
 	httpGetA()
@@ -206,6 +257,22 @@ func metricWorker(ID int, mChan chan []byte, udpClient net.Conn) {
 		payload := <-mChan
 		//time.Sleep(20 * time.Second)
 		fmt.Fprintf(udpClient, string(payload))
+		//udpClient.Write(payload)
+
+	}
+
+}
+
+func tcpWorker(ID int, mChan chan []byte, tcpClient net.Conn) {
+	log.Printf("starting tcp worker %s", ID)
+
+	for {
+		payload := <-mChan
+		_, err := tcpClient.Write(payload)
+		if err != nil {
+			log.Printf("err [%v]", err)
+		}
+		//fmt.Fprintf(tcpClient, string(payload))
 		//udpClient.Write(payload)
 
 	}
@@ -275,12 +342,16 @@ func main() {
 
 	metricChan = make(chan []byte, 4)
 	mqttChan = make(chan []byte, 4)
+	tcpChan = make(chan []byte, 4)
 
 	for i := 0; i < workers; i++ {
 		udpClient, _ = net.Dial("udp", "0.0.0.0:5140")
+		tcpClient, _ = net.Dial("tcp", "0.0.0.0:5170")
 		go metricWorker(i, metricChan, udpClient)
 
 		go mqttWorker(i, mqttChan, mqttClient)
+
+		go tcpWorker(i, tcpChan, tcpClient)
 	}
 
 	port := "8080"
@@ -298,6 +369,7 @@ func main() {
 	router.HandleFunc("/withudpchannel", withMultiTelegrafToChannel)
 	router.HandleFunc("/withmultitelegrafjson", withMultiTelegrafJSON)
 	router.HandleFunc("/withmqttchannel", withMqttChannel)
+	router.HandleFunc("/withtcp", withTCP)
 	router.Handle("/metrics", promhttp.Handler())
 
 	listenAddress := fmt.Sprintf(":%s", port)
